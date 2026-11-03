@@ -4,6 +4,7 @@ using MiniDpp.Api.Data;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddScoped<MiniDpp.Api.Services.CsvImportService>();
 
 // SQLite veritabanı bağlantısı
 builder.Services.AddDbContext<AppDbContext>(options =>
