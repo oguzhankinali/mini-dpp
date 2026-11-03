@@ -1,10 +1,11 @@
 ﻿using System.Globalization;
+using CsvHelper;
+using CsvHelper.Configuration;
 using Microsoft.EntityFrameworkCore;
 using MiniDpp.Api.Data;
 using MiniDpp.Api.DTOs;
 using MiniDpp.Api.Models;
-
-namespace MiniDpp.Api.Services;
+using MiniDpp.Api.Services;
 
 public class CsvImportService
 {
@@ -18,172 +19,199 @@ public class CsvImportService
     public async Task<CsvImportResultDto> ProcessCsvAsync(Stream fileStream)
     {
         var result = new CsvImportResultDto();
-        using var reader = new StreamReader(fileStream);
+        var processedGtinsInFile = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        string? headerLine = await reader.ReadLineAsync();
-        if (headerLine == null)
+        using var reader = new StreamReader(fileStream);
+        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
-            result.Errors.Add(new CsvRowError { RowNumber = 1, Reason = "CSV dosyasi bos." });
+            HasHeaderRecord = true,
+            TrimOptions = TrimOptions.Trim,
+            MissingFieldFound = null,
+            HeaderValidated = null,
+            PrepareHeaderForMatch = args => args.Header?.Trim().ToLowerInvariant() ?? string.Empty
+        };
+
+        using var csv = new CsvReader(reader, config);
+
+
+        // Başlık satırını oku
+        try
+        {
+            if (!await csv.ReadAsync() || !csv.ReadHeader())
+            {
+                result.Errors.Add(new CsvRowError { RowNumber = 1, Reason = "CSV dosyasi bos veya baslik satiri okunamadi." });
+                return result;
+            }
+        }
+        catch (Exception ex)
+        {
+            result.Errors.Add(new CsvRowError { RowNumber = 1, Reason = $"CSV basligi okunurken hata olustu: {ex.Message}" });
             return result;
         }
 
-        // Baslik satiri 1. satir kabul edildigi icin veri satirlari 2'den baslar
-        int currentRowNumber = 1;
-        string? line;
-
-        while ((line = await reader.ReadLineAsync()) != null)
+        var headers = csv.HeaderRecord;
+        var requiredHeaders = new[] { "gtin", "model_adi", "batch_no", "elyaf_pamuk_yuzde", "elyaf_elastan_yuzde", "uretim_yeri", "karbon_kg_co2e" };
+        if (headers == null || !requiredHeaders.All(h => headers.Select(x => x.Trim().ToLowerInvariant()).Contains(h)))
         {
-            currentRowNumber++;
-
-            if (string.IsNullOrWhiteSpace(line))
+            result.Errors.Add(new CsvRowError
             {
+                RowNumber = 1,
+                Reason = "Gecersiz CSV basliklari. Dosya su basliklari icermelidir: gtin, model_adi, batch_no, elyaf_pamuk_yuzde, elyaf_elastan_yuzde, uretim_yeri, karbon_kg_co2e"
+            });
+            return result;
+        }
+
+        // Satırları tek tek işle; bir satır patlasa bile diğerleri devam eder
+        while (true)
+        {
+            bool hasMoreRecords;
+            try
+            {
+                hasMoreRecords = await csv.ReadAsync();
+            }
+            catch (Exception ex)
+            {
+                result.TotalRowsProcessed++;
+                result.FailedCount++;
+                result.Errors.Add(new CsvRowError
+                {
+                    RowNumber = csv.Parser.Row,
+                    Reason = $"Bozuk satir formati veya CSV okuma hatasi: {ex.Message}"
+                });
                 continue;
             }
 
+            if (!hasMoreRecords)
+            {
+                break;
+            }
+
+            int currentRowNumber = csv.Parser.Row;
             result.TotalRowsProcessed++;
 
-            // CSV alanlarini virgulden ayir
-            var columns = line.Split(',');
-            if (columns.Length < 7)
+            try
             {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                string? gtin = csv.GetField("gtin");
+                string? modelName = csv.GetField("model_adi");
+                string? batchNo = csv.GetField("batch_no");
+                string? cottonStr = csv.GetField("elyaf_pamuk_yuzde");
+                string? elastaneStr = csv.GetField("elyaf_elastan_yuzde");
+                string? productionPlace = csv.GetField("uretim_yeri");
+                string? carbonStr = csv.GetField("karbon_kg_co2e");
+
+                // 1. GTIN ve GS1 kontrolü
+                var gtinValidation = GtinValidator.Validate(gtin);
+                if (!gtinValidation.IsValid)
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = "Eksik sutun sayisi. Satir en az 7 sutun icermelidir."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = gtinValidation.ErrorMessage! });
+                    continue;
+                }
 
-            string gtin = columns[0].Trim();
-            string modelName = columns[1].Trim();
-            string batchNo = columns[2].Trim();
-            string cottonStr = columns[3].Trim();
-            string elastaneStr = columns[4].Trim();
-            string productionPlace = columns[5].Trim();
-            string carbonStr = columns[6].Trim();
+                string validGtin = gtin!.Trim();
 
-            // 1. GTIN ve GS1 Check Digit dogrulamasi
-            var gtinValidation = GtinValidator.Validate(gtin);
-            if (!gtinValidation.IsValid)
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                // Dosya içi mükerrer GTIN kontrolü
+                if (!processedGtinsInFile.Add(validGtin))
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = gtinValidation.ErrorMessage!
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = $"GTIN ({validGtin}) ayni CSV dosyasinda birden fazla kez yer aliyor." });
+                    continue;
+                }
 
-            // Mukerrer GTIN kontrolu
-            bool gtinExists = await _context.ProductPassports.AnyAsync(p => p.Gtin == gtin);
-            if (gtinExists)
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                // Veritabanı mükerrer GTIN kontrolü
+                bool gtinExistsInDb = await _context.ProductPassports.AnyAsync(p => p.Gtin == validGtin);
+                if (gtinExistsInDb)
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = $"GTIN ({gtin}) sistemde zaten kayitli."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = $"GTIN ({validGtin}) sistemde zaten kayitli." });
+                    continue;
+                }
 
-            // 2. Metin alanlarinin bos olmama kontrolu
-            if (string.IsNullOrWhiteSpace(modelName) || string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(productionPlace))
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                // 2. Zorunlu alan kontrolü
+                if (string.IsNullOrWhiteSpace(modelName) || string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(productionPlace))
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = "Model adi, batch numarasi ve uretim yeri alanlari bos birakilamaz."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = "Model adi, batch numarasi ve uretim yeri bos birakilamaz." });
+                    continue;
+                }
 
-            // 3. Elyaf oranlari dogrulamasi
-            if (!decimal.TryParse(cottonStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal cotton) ||
-                !decimal.TryParse(elastaneStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal elastane))
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                // 3. Elyaf oranları kontrolü
+                if (!decimal.TryParse(cottonStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal cotton) ||
+                    !decimal.TryParse(elastaneStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal elastane))
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = "Elyaf pamuk ve elastan oranlari sayisal deger olmalidir."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = "Elyaf oranlari sayisal deger olmalidir." });
+                    continue;
+                }
 
-            if (cotton < 0 || cotton > 100 || elastane < 0 || elastane > 100)
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                if (cotton < 0 || cotton > 100 || elastane < 0 || elastane > 100)
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = "Elyaf oranlari 0 ile 100 araliginda olmalidir."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = "Elyaf oranlari 0 ile 100 araliginda olmalidir." });
+                    continue;
+                }
 
-            if ((cotton + elastane) != 100m)
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                if ((cotton + elastane) != 100m)
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = $"Elyaf oranlari toplami %100 olmalidir. Mevcut toplam: %{cotton + elastane}"
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = $"Elyaf oranlari toplami %100 olmalidir. Mevcut toplam: %{cotton + elastane}" });
+                    continue;
+                }
 
-            // 4. Karbon degeri dogrulamasi
-            if (!decimal.TryParse(carbonStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal carbon) || carbon < 0)
-            {
-                result.FailedCount++;
-                result.Errors.Add(new CsvRowError
+                // 4. Karbon değeri kontrolü
+                if (!decimal.TryParse(carbonStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal carbon) || carbon < 0)
                 {
-                    RowNumber = currentRowNumber,
-                    Reason = "Karbon degeri sayisal ve negatif olmayan bir deger olmalidir."
-                });
-                continue;
-            }
+                    result.FailedCount++;
+                    result.Errors.Add(new CsvRowError { RowNumber = currentRowNumber, Reason = "Karbon degeri sayisal ve negatif olmayan bir deger olmalidir." });
+                    continue;
+                }
 
-            // 5. Iliskisel veritabani kaydi (ProductModel -> Batch -> ProductPassport)
-            var productModel = await _context.ProductModels.FirstOrDefaultAsync(m => m.Name == modelName);
-            if (productModel == null)
-            {
-                productModel = new ProductModel { Name = modelName };
-                _context.ProductModels.Add(productModel);
-                await _context.SaveChangesAsync();
-            }
-
-            var batch = await _context.Batches.FirstOrDefaultAsync(b => b.BatchNo == batchNo);
-            if (batch == null)
-            {
-                batch = new Batch
+                // 5. Model ve Modele bağlı Parti Eşleştirmesi
+                var productModel = await _context.ProductModels.FirstOrDefaultAsync(m => m.Name == modelName.Trim());
+                if (productModel == null)
                 {
-                    BatchNo = batchNo,
-                    ProductionPlace = productionPlace,
-                    ProductModelId = productModel.Id
+                    productModel = new ProductModel { Name = modelName.Trim() };
+                    _context.ProductModels.Add(productModel);
+                    await _context.SaveChangesAsync();
+                }
+
+                var batch = await _context.Batches.FirstOrDefaultAsync(b => b.BatchNo == batchNo.Trim() && b.ProductModelId == productModel.Id);
+                if (batch == null)
+                {
+                    batch = new Batch
+                    {
+                        BatchNo = batchNo.Trim(),
+                        ProductionPlace = productionPlace.Trim(),
+                        ProductModelId = productModel.Id
+                    };
+                    _context.Batches.Add(batch);
+                    await _context.SaveChangesAsync();
+                }
+
+                var passport = new ProductPassport
+                {
+                    Gtin = validGtin,
+                    CottonPercentage = cotton,
+                    ElastanePercentage = elastane,
+                    CarbonKgCo2e = carbon,
+                    BatchId = batch.Id
                 };
-                _context.Batches.Add(batch);
+
+                _context.ProductPassports.Add(passport);
                 await _context.SaveChangesAsync();
+
+                result.SuccessCount++;
+                result.SavedGtins.Add(validGtin);
             }
-
-            var passport = new ProductPassport
+            catch (Exception ex)
             {
-                Gtin = gtin,
-                CottonPercentage = cotton,
-                ElastanePercentage = elastane,
-                CarbonKgCo2e = carbon,
-                BatchId = batch.Id
-            };
-
-            _context.ProductPassports.Add(passport);
-            await _context.SaveChangesAsync();
-
-            result.SuccessCount++;
-            result.SavedGtins.Add(gtin);
+                result.FailedCount++;
+                result.Errors.Add(new CsvRowError
+                {
+                    RowNumber = currentRowNumber,
+                    Reason = $"Satir islenirken beklenmeyen hata olustu: {ex.Message}"
+                });
+            }
         }
 
         return result;

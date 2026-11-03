@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, CheckCircle2, AlertTriangle, FileText, QrCode, ShieldCheck, Eye, RefreshCw } from 'lucide-react';
+import { Upload, FileText, QrCode, ShieldCheck, Eye, RefreshCw } from 'lucide-react';
 
 interface CsvRowError {
   rowNumber: number;
@@ -30,6 +30,7 @@ const API_BASE_URL = 'http://localhost:5059';
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<CsvImportResult | null>(null);
   const [products, setProducts] = useState<ProductItem[]>([]);
   const [selectedQrGtin, setSelectedQrGtin] = useState<string | null>(null);
@@ -62,6 +63,7 @@ export default function App() {
 
     setLoading(true);
     setImportResult(null);
+    setApiError(null);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -72,11 +74,16 @@ export default function App() {
         body: formData,
       });
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || `Sunucu hatası: HTTP ${res.status}`);
+      }
+
       const data: CsvImportResult = await res.json();
       setImportResult(data);
       fetchProducts();
-    } catch (err) {
-      console.error('CSV yukleme hatasi:', err);
+    } catch (err: any) {
+      setApiError(err.message || 'Sunucuya bağlanılamadı. Backend servisinin açık olduğundan emin olun.');
     } finally {
       setLoading(false);
     }
@@ -93,7 +100,7 @@ export default function App() {
         </p>
       </header>
 
-      {/* CSV Yukleme Kutusu */}
+      {/* CSV Yükleme Alanı */}
       <section style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 24, marginBottom: 28, boxShadow: '0 2px 4px rgba(0,0,0,0.03)' }}>
         <h2 style={{ fontSize: 18, marginTop: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
           <Upload size={20} color="#2563eb" /> CSV İçe Aktarma ve Doğrulama
@@ -121,12 +128,19 @@ export default function App() {
               gap: 6
             }}
           >
-            {loading ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />}
+            {loading ? <RefreshCw size={16} /> : <Upload size={16} />}
             {loading ? 'İşleniyor...' : 'CSV Doğrula ve Yükle'}
           </button>
         </form>
 
-        {/* Dogrulama ve Import Raporu */}
+        {/* API veya Bağlantı Hatası Bildirimi */}
+        {apiError && (
+          <div style={{ marginTop: 16, padding: 12, background: '#fef2f2', border: '1px solid #f87171', borderRadius: 8, color: '#991b1b', fontSize: 14 }}>
+            ⚠️ {apiError}
+          </div>
+        )}
+
+        {/* Doğrulama ve İçe Aktarma Raporu */}
         {importResult && (
           <div style={{ marginTop: 20, padding: 16, borderRadius: 8, background: importResult.failedCount > 0 ? '#fef2f2' : '#f0fdf4', border: `1px solid ${importResult.failedCount > 0 ? '#fecaca' : '#bbf7d0'}` }}>
             <div style={{ display: 'flex', gap: 16, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
@@ -163,7 +177,7 @@ export default function App() {
         )}
       </section>
 
-      {/* Kayitli Urunler Tablosu */}
+      {/* Kayıtlı Ürünler Tablosu */}
       <section style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 24, boxShadow: '0 2px 4px rgba(0,0,0,0.03)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h2 style={{ fontSize: 18, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>

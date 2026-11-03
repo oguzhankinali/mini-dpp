@@ -16,13 +16,13 @@ public static class GtinValidator
             return (false, $"GTIN 14 haneli olmalidir. Mevcut hane sayisi: {gtin.Length}");
         }
 
-        if (!gtin.All(char.IsDigit))
+        // ASCII 0-9 kontrolü
+        if (!gtin.All(c => c >= '0' && c <= '9'))
         {
             return (false, "GTIN yalnizca rakamlardan olusmalidir.");
         }
 
-        // GS1 GTIN-14 Check Digit algoritmasi
-        // Ilk 13 basamak sagdan sola sirasiyla 3 ve 1 agirliklariyla carpilir.
+        // GS1 Modulo 10 kontrol basamağı
         int checkDigit = gtin[13] - '0';
         int sum = 0;
 

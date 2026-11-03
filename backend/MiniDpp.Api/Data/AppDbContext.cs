@@ -17,7 +17,7 @@ public class AppDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
-        // Mükerrer GTIN kaydını engellemek için unique index
+        // Mükerrer GTIN kaydını engellemek için tekil indeks
         modelBuilder.Entity<ProductPassport>()
             .HasIndex(p => p.Gtin)
             .IsUnique();
@@ -27,12 +27,12 @@ public class AppDbContext : DbContext
             .HasIndex(m => m.Name)
             .IsUnique();
 
-        // Batch numarasının tekilliği
+        // Aynı model altında aynı parti numarasının tekrarlanmasını önleyen bileşik tekil indeks
         modelBuilder.Entity<Batch>()
-            .HasIndex(b => b.BatchNo)
+            .HasIndex(e => new { e.ProductModelId, e.BatchNo })
             .IsUnique();
 
-        // Decimal alanlar için veri hassasiyet yapılandırması
+        // Ondalıklı alanlar için veri hassasiyeti
         modelBuilder.Entity<ProductPassport>(entity =>
         {
             entity.Property(e => e.CottonPercentage).HasPrecision(5, 2);
