@@ -1,10 +1,25 @@
 using Microsoft.EntityFrameworkCore;
 using MiniDpp.Api.Data;
+using MiniDpp.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// CORS politikası (Frontend entegrasyonu için)
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
 builder.Services.AddControllers();
-builder.Services.AddScoped<MiniDpp.Api.Services.CsvImportService>();
+
+// Servis kayıtları
+builder.Services.AddScoped<CsvImportService>();
+builder.Services.AddSingleton<QrCodeService>();
 
 // SQLite veritabanı bağlantısı
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -28,6 +43,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseCors();
 app.UseHttpsRedirection();
 app.MapControllers();
 

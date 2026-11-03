@@ -29,10 +29,10 @@ public class CsvImportService
 
         // Baslik satiri 1. satir kabul edildigi icin veri satirlari 2'den baslar
         int currentRowNumber = 1;
+        string? line;
 
-        while (!reader.EndOfStream)
+        while ((line = await reader.ReadLineAsync()) != null)
         {
-            var line = await reader.ReadLineAsync();
             currentRowNumber++;
 
             if (string.IsNullOrWhiteSpace(line))
